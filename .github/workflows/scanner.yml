@@ -1,0 +1,40 @@
+name: Stock Scanner Automation
+
+# 1. 언제 실행할지 정하는 규칙입니다.
+on:
+  schedule:
+    # 한국 시간(KST) 평일(월~금) 20:00에 실행
+    # (표준 시간 UTC 기준으로는 11:00, 요일 1-5는 월~금)
+    - cron: '0 11 * * 1-5'
+  
+  # 수동으로도 실행할 수 있게 '버튼'을 만듭니다.
+  workflow_dispatch:
+
+jobs:
+  build:
+    # 깃허브에서 제공하는 가상의 컴퓨터(우분투)를 빌립니다.
+    runs-on: ubuntu-latest
+
+    steps:
+      # 2. 내 사무실에 있는 코드를 가상 컴퓨터로 가져옵니다.
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      # 3. 파이썬을 설치합니다.
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      # 4. 필요한 도구들(requirements.txt)을 설치합니다.
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      # 5. 실제로 파이썬 스캐너를 돌립니다.
+      - name: Run Python Script
+        env:
+          # 금고(Secrets)에서 텔레그램 비밀번호를 꺼내서 비서에게 줍니다.
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: python my_scanner.py
