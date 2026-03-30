@@ -1,3 +1,4 @@
+import os
 import FinanceDataReader as fdr
 import pandas as pd
 import requests
