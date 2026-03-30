@@ -1,5 +1,5 @@
-pandas
-FinanceDataReader
+pandas>=2.3.3
+finance-datareader
 requests
 beautifulsoup4
 lxml
