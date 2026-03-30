@@ -1,5 +1,6 @@
 pandas
-yfinance
 FinanceDataReader
 requests
 beautifulsoup4
+lxml
+yfinance
