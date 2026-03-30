@@ -1,101 +1,29 @@
-import FinanceDataReader as fdr
-import pandas as pd
-import requests
-import time
-import os
-from bs4 import BeautifulSoup
+name: Stock Scanner Automation
 
-# --- [설정: 깃허브 보안 적용] ---
-TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
-CHAT_ID = os.environ.get('CHAT_ID')
+on:
+  schedule:
+    # 한국 시간(KST) 평일(월~금) 20:00에 실행
+    - cron: '0 11 * * 1-5'
+  workflow_dispatch: # 수동 실행 버튼
 
-SLOPE_LIMIT = -0.0002  
-VOL_MULT = 1.5         
-VOL_20_DAY_MULT = 3.0  
-SQZ_THRESH = 0.15      
-# ------------------------------
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
 
-def send_telegram(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    params = {"chat_id": CHAT_ID, "text": message}
-    try:
-        requests.get(url, params=params)
-    except Exception as e:
-        print(f"Telegram 전송 에러: {e}")
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
 
-def get_naver_news(query):
-    search_url = f"https://search.naver.com/search.naver?where=news&sm=tab_jum&query={query}"
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    news_list = []
-    try:
-        response = requests.get(search_url, headers=headers)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        news_elements = soup.select('div.news_area > a.news_title')
-        for news in news_elements[:3]: 
-            news_list.append(f"- {news.get_text().strip()}: {news['href']}")
-    except Exception as e:
-        print(f"뉴스 가져오기 에러 ({query}): {e}")
-    return "\n".join(news_list) if news_list else "(관련 뉴스 없음)"
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
 
-def format_marcap(marcap_value):
-    if marcap_value is None: return "N/A"
-    if marcap_value >= 1_000_000_000_000:
-        trillions = marcap_value // 1_000_000_000_000
-        billions = round((marcap_value % 1_000_000_000_000) / 10_000_000_000)
-        return f"{trillions:,.0f}조 {billions:,.0f}억"
-    elif marcap_value >= 100_000_000:
-        billions = round(marcap_value / 100_000_000)
-        return f"{billions:,.0f}억"
-    return f"{marcap_value:,.0f}원"
-
-def check_strategy():
-    print("🚀 가인 님의 고도화 스캐너 가동!")
-    df_krx = fdr.StockListing('KRX')
-    df_krx = df_krx[~df_krx['Name'].str.contains('스팩', na=False)]
-    count = 0
-
-    for index, row in df_krx.iterrows():
-        code = row['Code']
-        name = row['Name']
-        marcap = row['Marcap']
-
-        try:
-            df = fdr.DataReader(code)
-            if len(df) < 160: continue
-
-            df['ma150'] = df['Close'].rolling(window=150).mean()
-            df['ma50'] = df['Close'].rolling(window=50).mean()
-            slope = (df['ma150'].iloc[-1] - df['ma150'].iloc[-2]) / df['ma150'].iloc[-2]
-
-            std = df['Close'].rolling(window=20).std()
-            upper = df['Close'].rolling(window=20).mean() + (std * 2)
-            lower = df['Close'].rolling(window=20).mean() - (std * 2)
-            bandwidth = (upper - lower) / df['ma150']
-
-            vol_sma50 = df['Volume'].rolling(window=50).mean()
-            vol_surge_50 = df['Volume'].iloc[-1] > vol_sma50.iloc[-1] * VOL_MULT
-            vol_sma20 = df['Volume'].rolling(window=20).mean()
-            vol_surge_20_day_300 = df['Volume'].iloc[-1] > vol_sma20.iloc[-1] * VOL_20_DAY_MULT
-            breakout = df['Close'].iloc[-1] > df['High'].iloc[-11:-1].max()
-
-            is_downtrend = slope < SLOPE_LIMIT
-            signal_turn = (not is_downtrend) and (df['Close'].iloc[-2] < df['ma150'].iloc[-2]) and (df['Close'].iloc[-1] > df['ma150'].iloc[-1])
-            
-            is_uptrend = df['Close'].iloc[-1] > df['ma50'].iloc[-1]
-            recent_squeeze = bandwidth.iloc[-10:].min() < SQZ_THRESH
-            signal_vcp = (not is_downtrend) and is_uptrend and recent_squeeze and vol_surge_50 and vol_surge_20_day_300 and breakout
-
-            if signal_turn or signal_vcp:
-                type_msg = "BUY(Turn)" if signal_turn else "BUY(VCP)"
-                news_articles = get_naver_news(name)
-                formatted_marcap = format_marcap(marcap)
-                msg = f"✅ [{type_msg}] 신호!\n종목: {name} ({code})\n시총: {formatted_marcap}\n기울기: {slope:.5f}\n\n[뉴스]\n{news_articles}"
-                send_telegram(msg)
-                count += 1
-            time.sleep(0.05)
-        except: continue
-
-    send_telegram(f"📢 스캔 완료! 총 {count}개 종목 발견.")
-
-if __name__ == "__main__":
-    check_strategy()
+      - name: Run Python Script
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: python my_scanner.py
