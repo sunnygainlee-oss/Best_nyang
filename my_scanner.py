@@ -1,9 +1,9 @@
-import os
 import FinanceDataReader as fdr
 import pandas as pd
 import requests
 import time
 from bs4 import BeautifulSoup # Add BeautifulSoup for web scraping
+import datetime # Added for today's date
 
 # --- [설정: 여기만 수정하세요] ---
 TELEGRAM_TOKEN = "8794261749:AAEloyQQJaAf90DRIJkDT3vYhOOSRbpTVdc" # 여기에 실제 텔레그램 봇 토큰을 입력하세요
@@ -12,6 +12,9 @@ SLOPE_LIMIT = -0.0002  # 150일선 기울기 기준
 VOL_MULT = 1.5         # 거래량 돌파 기준 (기존 50일선 기준)
 VOL_20_DAY_MULT = 3.0  # 20일 거래량 평균 대비 300% 이상 조건
 SQZ_THRESH = 0.15      # 압축 강도
+
+# 상대강도 계산에 사용할 기간들 (거래일 기준)
+RS_LOOKBACK_PERIODS = [1, 20, 60] # 변경: 당일(1일), 20일, 60일
 # ------------------------------
 
 def send_telegram(message):
@@ -20,21 +23,6 @@ def send_telegram(message):
     print(f"Attempting to send Telegram message to URL: {url} with params: {params}") # Debugging line added
     response = requests.get(url, params=params)
     print(f"Telegram API response: {response.json()}") # Print response for debugging
-
-def get_naver_news(query):
-    search_url = f"https://search.naver.com/search.naver?where=news&sm=tab_jum&query={query}"
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    news_list = []
-    try:
-        response = requests.get(search_url, headers=headers)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        # Find news titles and links
-        news_elements = soup.select('div.news_area > a.news_title')
-        for news in news_elements[:3]: # Get top 3 news articles
-            news_list.append(f"- {news.get_text().strip()}: {news['href']}")
-    except Exception as e:
-        print(f"Error fetching Naver news for {query}: {e}")
-    return "\n".join(news_list) if news_list else "(관련 뉴스 없음)"
 
 def format_marcap(marcap_value):
     if marcap_value is None:
@@ -55,6 +43,42 @@ def format_marcap(marcap_value):
 def check_strategy():
     print("🚀 전 종목 스캔을 시작합니다... (시간이 다소 소요될 수 있습니다)")
 
+    today = datetime.date.today()
+    initial_message = f"🗓️ {today.strftime('%Y년 %m월 %d일')} 주식 스캔 시작!\n\n"
+
+    # Fetch KOSPI and KOSDAQ index data once for Relative Strength (RS) calculation and initial message
+    df_kospi = None
+    df_kosdaq = None
+    try:
+        df_kospi = fdr.DataReader('KS11') # KOSPI index symbol
+        print("KOSPI data fetched successfully for RS calculation.")
+        if len(df_kospi) >= 2:
+            kospi_current = df_kospi['Close'].iloc[-1]
+            kospi_prev = df_kospi['Close'].iloc[-2]
+            kospi_change_rate = (kospi_current - kospi_prev) / kospi_prev * 100
+            initial_message += f"📈 코스피: {kospi_current:,.2f} ({kospi_change_rate:+.2f}%)\n"
+        else:
+            initial_message += "📈 코스피: 데이터 부족\n"
+    except Exception as e:
+        print(f"Error fetching KOSPI data for RS calculation: {e}")
+        initial_message += "📈 코스피: 정보 조회 오류\n"
+
+    try:
+        df_kosdaq = fdr.DataReader('KQ11') # KOSDAQ index symbol
+        print("KOSDAQ data fetched successfully for RS calculation.")
+        if len(df_kosdaq) >= 2:
+            kosdaq_current = df_kosdaq['Close'].iloc[-1]
+            kosdaq_prev = df_kosdaq['Close'].iloc[-2]
+            kosdaq_change_rate = (kosdaq_current - kosdaq_prev) / kosdaq_prev * 100
+            initial_message += f"📊 코스닥: {kosdaq_current:,.2f} ({kosdaq_change_rate:+.2f}%)\n\n"
+        else:
+            initial_message += "📊 코스닥: 데이터 부족\n\n"
+    except Exception as e:
+        print(f"Error fetching KOSDAQ data for RS calculation: {e}")
+        initial_message += "📊 코스닥: 정보 조회 오류\n\n"
+
+    send_telegram(initial_message) # Send initial status message
+
     # 코스피, 코스닥 종목 리스트 가져오기
     df_krx = fdr.StockListing('KRX')
 
@@ -67,11 +91,16 @@ def check_strategy():
         code = row['Code']
         name = row['Name']
         marcap = row['Marcap'] # 시가총액 정보 가져오기
+        market = row['Market'] # 시장 정보 가져오기 (KOSPI 또는 KOSDAQ)
+
+        # 시총 2천억원 이하 제외
+        if marcap is None or marcap < 200_000_000_000:
+            continue
 
         try:
-            # 최근 200일치 데이터 가져오기
+            # 최근 200일치 데이터 가져오기 (가장 긴 RS 기간 60일 + 여유분)
             df = fdr.DataReader(code)
-            if len(df) < 160: continue # 상장한 지 얼마 안 된 종목 제외
+            if len(df) < max(RS_LOOKBACK_PERIODS) + 10: continue # 상장한 지 얼마 안 된 종목 제외
 
             # 1. 이동평균선 및 기울기 계산
             df['ma150'] = df['Close'].rolling(window=150).mean()
@@ -109,12 +138,67 @@ def check_strategy():
             if signal_turn or signal_vcp:
                 type_msg = "BUY(Turn)" if signal_turn else "BUY(VCP)"
 
-                # Get Naver News
-                news_articles = get_naver_news(name)
-
                 # 시가총액 정보를 메시지에 추가
                 formatted_marcap = format_marcap(marcap)
-                msg = f"✅ [{type_msg}] 신호 발생!\n종목: {name} ({code})\n현재가: {df['Close'].iloc[-1]:,.0f}원\n시가총액: {formatted_marcap}\n기울기: {slope:.5f}\n\n[네이버 뉴스]\n{news_articles}"
+
+                # Determine market index for RS calculation
+                rs_market_name = "N/A"
+                # df_market_index는 이미 위에서 가져왔으므로 재사용
+                df_market_index = None
+                if market == 'KOSPI':
+                    df_market_index = df_kospi
+                    rs_market_name = "KOSPI"
+                elif market == 'KOSDAQ':
+                    df_market_index = df_kosdaq
+                    rs_market_name = "KOSDAQ"
+
+                rs_details = []
+                if df_market_index is not None and len(df_market_index) >= max(RS_LOOKBACK_PERIODS) + 1: # Ensure enough data for longest period + current
+                    for period in RS_LOOKBACK_PERIODS:
+                        rs_value = "N/A"
+                        # Ensure enough data points for the current period + current day
+                        if len(df) >= period + 1 and len(df_market_index) >= period + 1:
+                            try:
+                                stock_start_price = df['Close'].iloc[-1 - period]
+                                stock_current_price = df['Close'].iloc[-1]
+
+                                market_start_price = df_market_index['Close'].iloc[-1 - period]
+                                market_current_price = df_market_index['Close'].iloc[-1]
+
+                                if stock_start_price != 0 and market_start_price != 0: # Avoid division by zero
+                                    stock_performance_ratio = stock_current_price / stock_start_price
+                                    market_performance_ratio = market_current_price / market_start_price
+                                    if market_performance_ratio != 0: # Avoid division by zero
+                                        rs_value = f"{(stock_performance_ratio / market_performance_ratio):.2f}"
+                                    else:
+                                        rs_value = "N/A (시장 수익률 0)"
+                                else:
+                                    rs_value = "N/A (데이터 부족: 시작 가격 0)"
+                            except Exception as rs_e:
+                                print(f"Error calculating RS for {name} ({code}) over {period} days: {rs_e}")
+                        else:
+                            rs_value = "N/A (데이터 부족)" # Or less than period + 1 data points
+
+                        rs_display_text_for_period = rs_value
+                        if rs_value != "N/A" and "데이터 부족" not in rs_value and "시장 수익률 0" not in rs_value:
+                            try:
+                                rs_float = float(rs_value)
+                                if rs_float > 1.0:
+                                    rs_display_text_for_period += " (시장 대비 강세)"
+                                elif rs_float < 1.0:
+                                    rs_display_text_for_period += " (시장 대비 약세)"
+                                else:
+                                    rs_display_text_for_period += " (시장과 유사)"
+                            except ValueError:
+                                pass # Keep as is if conversion fails for some reason
+                        rs_details.append(f"  {period}일: {rs_display_text_for_period}")
+
+                if rs_details:
+                    rs_output = f"상대강도(vs {rs_market_name}):\n" + "\n".join(rs_details)
+                else:
+                    rs_output = f"상대강도(vs {rs_market_name}): N/A"
+
+                msg = f"✅ [{type_msg}] 신호 발생!\n종목: {name} ({code})\n현재가: {df['Close'].iloc[-1]:,.0f}원\n시가총액: {formatted_marcap}\n{rs_output}"
                 print(msg)
                 send_telegram(msg)
                 count += 1
